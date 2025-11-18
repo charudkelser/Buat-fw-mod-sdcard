@@ -1,0 +1,126 @@
+name: Mod SDCard Builder
+
+on:
+  workflow_dispatch:
+    inputs:
+      bootloader:
+        description: "Select Bootloader"
+        required: true
+        default: "b860h"
+        type: choice
+        options:
+          - b860h
+          - hg680p
+      fw_link:
+        description: "Insert Firmware Link"
+        required: true
+        default: ""
+
+jobs:
+  build:
+    runs-on: ubuntu-22.04
+
+    steps:
+
+    - name: Checkout Repository
+      uses: actions/checkout@v3
+
+    - name: Setup Environment
+      run: |
+        sudo rm -rf /etc/apt/sources.list.d/* /usr/share/dotnet /usr/local/lib/android /opt/ghc
+        sudo apt update -y
+        sudo apt install -y wget python3 python3-pip gzip xz-utils losetup mount tar
+        sudo pip3 install gdown
+        sudo pip3 install git+https://github.com/Juvenal-Yescas/mediafire-dl
+        wget https://mega.nz/linux/repo/xUbuntu_22.04/amd64/megacmd-xUbuntu_22.04_amd64.deb
+        sudo apt install ./megacmd*.deb
+        mkdir openwrt
+
+    - name: Download Firmware
+      run: |
+        FW="${{ github.event.inputs.fw_link }}"
+        FILENAME=$(basename "$FW")
+
+        if echo "$FW" | grep -q "drive.google.com"; then
+          ID=$(echo "$FW" | sed -n 's/.*\/d\/\([^\/]*\).*/\1/p')
+          gdown "$ID" -O "openwrt/$FILENAME"
+        
+        elif echo "$FW" | grep -q "mediafire.com"; then
+          mediafire-dl "$FW" -o "openwrt/$FILENAME"
+
+        elif echo "$FW" | grep -q "mega.nz"; then
+          mega-get "$FW"
+          mv *.img* "openwrt/$FILENAME"
+
+        else
+          wget --no-check-certificate "$FW" -O "openwrt/$FILENAME"
+
+        fi
+
+    - name: Detect Firmware Extension
+      id: detect_ext
+      run: |
+        FILE=$(find openwrt -name "*.img.*")
+        echo "FILE=$FILE" >> $GITHUB_ENV
+        BASE=$(basename "$FILE")
+        NAME=${BASE%.*}
+        echo "NAME=$NAME" >> $GITHUB_ENV
+        EXT=${BASE##*.}
+        echo "EXT=$EXT" >> $GITHUB_ENV
+
+    - name: Extract & Modify Firmware
+      run: |
+        cd openwrt
+
+        if [[ "$EXT" == "gz" ]]; then
+          gunzip "$NAME.gz"
+        elif [[ "$EXT" == "xz" ]]; then
+          unxz "$NAME.xz"
+        fi
+
+        DEVICE=$(sudo losetup -fP --show "$NAME")
+        sudo mkdir boot
+        sudo mount "${DEVICE}p1" boot
+
+        sudo tar -xzvf ../files/mod-boot-sdcard.tar.gz -C boot
+
+        ROOT_UENV=$(grep APPEND boot/uEnv.txt | awk -F "root=" '{print $2}')
+        ROOT_EXTLINUX=$(grep append boot/extlinux/extlinux.conf | awk -F "root=" '{print $2}')
+        sudo sed -i "s|$ROOT_EXTLINUX|$ROOT_UENV|g" boot/extlinux/extlinux.conf
+
+        if [[ "${{ github.event.inputs.bootloader }}" == "b860h" ]]; then
+          DTB="meson-gxl-s905x-b860h.dtb"
+        else
+          DTB="meson-gxl-s905x-p212.dtb"
+        fi
+
+        OLD_DTB=$(grep dtb boot/boot.ini | awk -F "/" '{print $4}' | cut -d'"' -f1)
+
+        sudo sed -i "s/$OLD_DTB/$DTB/g" boot/boot.ini
+        sudo sed -i "s/$OLD_DTB/$DTB/g" boot/extlinux/extlinux.conf
+        sudo sed -i "s/$OLD_DTB/$DTB/g" boot/uEnv.txt
+
+        sudo umount boot
+
+        sudo dd if=../BootCardMaker/u-boot.bin of="$DEVICE" bs=1 count=444 conv=fsync
+        sudo dd if=../BootCardMaker/u-boot.bin of="$DEVICE" bs=512 skip=1 seek=1 conv=fsync
+
+        sudo losetup -d "$DEVICE"
+
+        if [[ "$EXT" == "gz" ]]; then
+          gzip "$NAME"
+        elif [[ "$EXT" == "xz" ]]; then
+          xz "$NAME"
+        fi
+
+        echo "::set-output name=result::$NAME.$EXT"
+
+    - name: Create Release
+      uses: softprops/action-gh-release@v2
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      with:
+        name: "Mod SDCard Build"
+        tag_name: latest
+        files: |
+          openwrt/*.img.*
