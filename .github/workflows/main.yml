@@ -39,46 +39,58 @@ jobs:
     - name: Download Firmware
       run: |
         FW="${{ github.event.inputs.fw_link }}"
-        FILENAME=$(basename "$FW")
 
+        echo "Downloading firmware..."
+        
         if echo "$FW" | grep -q "drive.google.com"; then
           ID=$(echo "$FW" | sed -n 's/.*\/d\/\([^\/]*\).*/\1/p')
-          gdown "$ID" -O "openwrt/$FILENAME"
-        
+          gdown "https://drive.google.com/uc?export=download&id=$ID" -O "openwrt/firmware.img.gz"
+
         elif echo "$FW" | grep -q "mediafire.com"; then
-          mediafire-dl "$FW" -o "openwrt/$FILENAME"
+          mediafire-dl "$FW" -o "openwrt/firmware.img.gz"
 
         elif echo "$FW" | grep -q "mega.nz"; then
-          mega-get "$FW"
-          mv *.img* "openwrt/$FILENAME"
+          mega-get "$FW" && mv *.img* openwrt/
 
         else
-          wget --no-check-certificate "$FW" -O "openwrt/$FILENAME"
-
+          wget --no-check-certificate "$FW" -O "openwrt/firmware.img.gz"
         fi
 
     - name: Detect Firmware Extension
       id: detect_ext
       run: |
-        FILE=$(find openwrt -name "*.img.*")
+        FILE=$(find openwrt -type f -name "*.img" -o -name "*.img.gz" -o -name "*.img.xz" | head -n 1)
         echo "FILE=$FILE" >> $GITHUB_ENV
+        
         BASE=$(basename "$FILE")
-        NAME=${BASE%.*}
+        NAME="${BASE%%.*}"
         echo "NAME=$NAME" >> $GITHUB_ENV
-        EXT=${BASE##*.}
+
+        if [[ "$BASE" == *.img.gz ]]; then
+          EXT="gz"
+        elif [[ "$BASE" == *.img.xz ]]; then
+          EXT="xz"
+        else
+          EXT="raw"
+        fi
+
         echo "EXT=$EXT" >> $GITHUB_ENV
 
     - name: Extract & Modify Firmware
       run: |
         cd openwrt
 
+        # Extract firmware
         if [[ "$EXT" == "gz" ]]; then
-          gunzip "$NAME.gz"
+          gunzip *.img.gz
         elif [[ "$EXT" == "xz" ]]; then
-          unxz "$NAME.xz"
+          unxz *.img.xz
         fi
 
-        DEVICE=$(sudo losetup -fP --show "$NAME")
+        IMG=$(find . -name "*.img")
+
+        # Mount img
+        DEVICE=$(sudo losetup -fP --show "$IMG")
         sudo mkdir boot
         sudo mount "${DEVICE}p1" boot
 
@@ -107,13 +119,12 @@ jobs:
 
         sudo losetup -d "$DEVICE"
 
+        # Repack
         if [[ "$EXT" == "gz" ]]; then
-          gzip "$NAME"
+          gzip "$IMG"
         elif [[ "$EXT" == "xz" ]]; then
-          xz "$NAME"
+          xz "$IMG"
         fi
-
-        echo "::set-output name=result::$NAME.$EXT"
 
     - name: Create Release
       uses: softprops/action-gh-release@v2
@@ -123,4 +134,4 @@ jobs:
         name: "Mod SDCard Build"
         tag_name: latest
         files: |
-          openwrt/*.img.*
+          openwrt/*.img*
