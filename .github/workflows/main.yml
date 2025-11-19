@@ -1,137 +1,90 @@
-name: Mod SDCard Builder
+name: Build Mod Boot IMG
 
 on:
   workflow_dispatch:
     inputs:
-      bootloader:
-        description: "Select Bootloader"
+      device:
+        description: "Pilih device (hg680p atau b860h)"
         required: true
-        default: "b860h"
-        type: choice
-        options:
-          - b860h
-          - hg680p
-      fw_link:
-        description: "Insert Firmware Link"
-        required: true
-        default: ""
+        default: "hg680p"
 
 jobs:
   build:
-    runs-on: ubuntu-22.04
+    runs-on: ubuntu-latest
 
     steps:
-
-    - name: Checkout Repository
+    - name: Checkout repository
       uses: actions/checkout@v3
 
-    - name: Setup Environment
+    - name: Install dependencies
       run: |
-        sudo rm -rf /etc/apt/sources.list.d/* /usr/share/dotnet /usr/local/lib/android /opt/ghc
-        sudo apt update -y
-        sudo apt install -y wget python3 python3-pip gzip xz-utils util-linux tar
-        sudo pip3 install gdown
-        sudo pip3 install git+https://github.com/Juvenal-Yescas/mediafire-dl
-        wget https://mega.nz/linux/repo/xUbuntu_22.04/amd64/megacmd-xUbuntu_22.04_amd64.deb
-        sudo apt install ./megacmd*.deb
-        mkdir openwrt
+        sudo apt update
+        sudo apt install -y xz-utils dosfstools gdisk udev util-linux
 
-    - name: Download Firmware
+    - name: Cari file firmware .img.xz
+      id: findxz
       run: |
-        FW="${{ github.event.inputs.fw_link }}"
-
-        echo "Downloading firmware..."
-        
-        if echo "$FW" | grep -q "drive.google.com"; then
-          ID=$(echo "$FW" | sed -n 's/.*\/d\/\([^\/]*\).*/\1/p')
-          gdown "https://drive.google.com/uc?export=download&id=$ID" -O "openwrt/firmware.img.gz"
-
-        elif echo "$FW" | grep -q "mediafire.com"; then
-          mediafire-dl "$FW" -o "openwrt/firmware.img.gz"
-
-        elif echo "$FW" | grep -q "mega.nz"; then
-          mega-get "$FW" && mv *.img* openwrt/
-
-        else
-          wget --no-check-certificate "$FW" -O "openwrt/firmware.img.gz"
+        FILE=$(find openwrt -maxdepth 1 -type f -name "*.img.xz" | head -n 1)
+        if [[ -z "$FILE" ]]; then
+          echo "Tidak menemukan file .img.xz di folder openwrt/"
+          exit 1
         fi
+        NAME=$(basename "$FILE" .xz)
 
-    - name: Detect Firmware Extension
-      id: detect_ext
-      run: |
-        FILE=$(find openwrt -type f -name "*.img" -o -name "*.img.gz" -o -name "*.img.xz" | head -n 1)
         echo "FILE=$FILE" >> $GITHUB_ENV
-        
-        BASE=$(basename "$FILE")
-        NAME="${BASE%%.*}"
         echo "NAME=$NAME" >> $GITHUB_ENV
+        echo "IMG=${NAME}" >> $GITHUB_ENV
 
-        if [[ "$BASE" == *.img.gz ]]; then
-          EXT="gz"
-        elif [[ "$BASE" == *.img.xz ]]; then
-          EXT="xz"
-        else
-          EXT="raw"
-        fi
-
-        echo "EXT=$EXT" >> $GITHUB_ENV
-
-    - name: Extract & Modify Firmware
+    - name: Extract image (.img.xz → .img)
       run: |
-        cd openwrt
+        echo "Extracting: $FILE"
+        unxz "$FILE"
 
-        # Extract firmware
-        if [[ "$EXT" == "gz" ]]; then
-          gunzip *.img.gz
-        elif [[ "$EXT" == "xz" ]]; then
-          unxz *.img.xz
-        fi
+    - name: Mount image
+      run: |
+        LOOP=$(sudo losetup -fP --show "$IMG")
+        echo "LOOP=$LOOP" >> $GITHUB_ENV
 
-        IMG=$(find . -name "*.img")
+        sudo mkdir bootp
+        sudo mount "${LOOP}p1" bootp
 
-        # Mount img
-        DEVICE=$(sudo losetup -fP --show "$IMG")
-        sudo mkdir boot
-        sudo mount "${DEVICE}p1" boot
+        sudo tar -xzf files/mod-boot-sdcard.tar.gz -C bootp
 
-        sudo tar -xzvf ../files/mod-boot-sdcard.tar.gz -C boot
+        ROOT_UENV=$(grep APPEND bootp/uEnv.txt | awk -F "root=" '{print $2}')
+        ROOT_EXT=$(grep append bootp/extlinux/extlinux.conf | awk -F "root=" '{print $2}')
 
-        ROOT_UENV=$(grep APPEND boot/uEnv.txt | awk -F "root=" '{print $2}')
-        ROOT_EXTLINUX=$(grep append boot/extlinux/extlinux.conf | awk -F "root=" '{print $2}')
-        sudo sed -i "s|$ROOT_EXTLINUX|$ROOT_UENV|g" boot/extlinux/extlinux.conf
+        sudo sed -i "s|$ROOT_EXT|$ROOT_UENV|g" bootp/extlinux/extlinux.conf
 
-        if [[ "${{ github.event.inputs.bootloader }}" == "b860h" ]]; then
+        # Auto select DTB
+        if [[ "${{ github.event.inputs.device }}" == "b860h" ]]; then
           DTB="meson-gxl-s905x-b860h.dtb"
         else
           DTB="meson-gxl-s905x-p212.dtb"
         fi
 
-        OLD_DTB=$(grep dtb boot/boot.ini | awk -F "/" '{print $4}' | cut -d'"' -f1)
+        OLD_DTB=$(grep dtb bootp/boot.ini | awk '{print $4}' | cut -d'"' -f1)
 
-        sudo sed -i "s/$OLD_DTB/$DTB/g" boot/boot.ini
-        sudo sed -i "s/$OLD_DTB/$DTB/g" boot/extlinux/extlinux.conf
-        sudo sed -i "s/$OLD_DTB/$DTB/g" boot/uEnv.txt
+        sudo sed -i "s|$OLD_DTB|$DTB|g" bootp/boot.ini
+        sudo sed -i "s|$OLD_DTB|$DTB|g" bootp/extlinux/extlinux.conf
+        sudo sed -i "s|$OLD_DTB|$DTB|g" bootp/uEnv.txt
 
-        sudo umount boot
+        sudo umount bootp
 
-        sudo dd if=../BootCardMaker/u-boot.bin of="$DEVICE" bs=1 count=444 conv=fsync
-        sudo dd if=../BootCardMaker/u-boot.bin of="$DEVICE" bs=512 skip=1 seek=1 conv=fsync
+    - name: Inject U-Boot bootloader
+      run: |
+        sudo dd if=./BootCardMaker/u-boot.bin of="$LOOP" bs=1 count=444 conv=fsync
+        sudo dd if=./BootCardMaker/u-boot.bin of="$LOOP" bs=512 skip=1 seek=1 conv=fsync
 
-        sudo losetup -d "$DEVICE"
+        sudo losetup -d "$LOOP"
 
-        # Repack
-        if [[ "$EXT" == "gz" ]]; then
-          gzip "$IMG"
-        elif [[ "$EXT" == "xz" ]]; then
-          xz "$IMG"
-        fi
+    - name: Repack .img → .img.xz
+      run: |
+        echo "Compressing back to xz..."
+        xz "$IMG"
 
-    - name: Create Release
-      uses: softprops/action-gh-release@v2
-      env:
-        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+    - name: Upload result
+      uses: actions/upload-artifact@v3
       with:
-        name: "Mod SDCard Build"
-        tag_name: latest
-        files: |
-          openwrt/*.img*
+        name: modboot-output
+        path: |
+          *.img.xz
