@@ -1,4 +1,4 @@
-name: Mod SDCard Builder
+Name: Mod SDCard Builder
 
 on:
   workflow_dispatch:
@@ -36,26 +36,46 @@ jobs:
         sudo apt install ./megacmd*.deb
         mkdir openwrt
 
-    - name: Download Firmware
+    - name: Download Firmware (Optimized)
       run: |
         FW="${{ github.event.inputs.fw_link }}"
         FILENAME=$(basename "$FW")
 
+        # --- Google Drive Optimization ---
         if echo "$FW" | grep -q "drive.google.com"; then
-          ID=$(echo "$FW" | sed -n 's/.*\/d\/\([^\/]*\).*/\1/p')
-          gdown "$ID" -O "openwrt/$FILENAME"
-        
+          echo "Processing Google Drive link..."
+          # Mencoba mengekstrak ID dari berbagai format tautan (d/.../view, uc?id=, dll.)
+          ID=$(echo "$FW" | sed -n 's/.*\/d\/\([^\/]*\).*/\1/p' | sed 's/\(.*\)?usp=sharing/\1/')
+          if [ -z "$ID" ]; then
+            ID=$(echo "$FW" | sed -n 's/.*id=\([^&]*\).*/\1/p')
+          fi
+          
+          if [ -n "$ID" ]; then
+            echo "Google Drive File ID detected: $ID"
+            gdown "$ID" -O "openwrt/$FILENAME" --fuzzy 
+            # '--fuzzy' membantu mengunduh bahkan jika ada kesalahan deteksi nama file awal
+          else
+            echo "Warning: Could not extract ID. Trying gdown with full link."
+            # Jika ID gagal diekstrak, coba gunakan tautan penuh (meskipun gdown lebih baik dengan ID)
+            gdown "$FW" -O "openwrt/$FILENAME" --fuzzy
+          fi
+
+        # --- MediaFire, Mega.nz, dan Lainnya (Logika Asli) ---
         elif echo "$FW" | grep -q "mediafire.com"; then
+          echo "Processing MediaFire link..."
           mediafire-dl "$FW" -o "openwrt/$FILENAME"
 
         elif echo "$FW" | grep -q "mega.nz"; then
+          echo "Processing Mega.nz link..."
           mega-get "$FW"
           mv *.img* "openwrt/$FILENAME"
 
         else
+          echo "Processing generic link..."
           wget --no-check-certificate "$FW" -O "openwrt/$FILENAME"
-
         fi
+
+# --- Sisa langkah-langkah di bawah tetap sama ---
 
     - name: Detect Firmware Extension
       id: detect_ext
